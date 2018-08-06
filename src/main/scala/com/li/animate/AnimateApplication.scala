@@ -1,7 +1,8 @@
 package com.li.animate
 
 import java.text.SimpleDateFormat
-import java.util.{Date}
+import java.util.Date
+
 
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.sql.{Dataset, Row, SQLContext}
@@ -10,6 +11,8 @@ import org.json4s.jackson.JsonMethods._
 import org.json4s.jackson.Serialization
 
 import scala.util.control.Breaks._
+
+import redis.clients.jedis._
 
 case class UserAnimate(conditionKey: String,
                        isEqual: Int,
@@ -25,36 +28,51 @@ case class Animate(area: Long,
                    terminal: String,
                    userName: String) extends Serializable
 
+class AnimateApplication {
+
+}
+
+
 object AnimateApplication {
+  def parseDouble(s: String): Option[Long] = try {
+    Some(s.toLong)
+  } catch {
+    case _ => None
+  }
 
   def main(args: Array[String]): Unit = {
 
+    implicit var taskId: String = ""
 
-    val aus: String = "{\"usa\":" +
-      "[" +
-      "{\"conditionKey\":\"subject\",\"isEqual\":1,\"conditionValue\":\"1,100100594\"}," +
-      "{\"conditionKey\":\"area\",\"isEqual\":0,\"conditionValue\":\"-9\"}," +
-      "{\"conditionKey\":\"terminal\",\"isEqual\":1,\"conditionValue\":\"2\"}]}"
-    val logic: String = "0"
-    val begDate: Long = 1530604662956L
-    val endDate: Long = 1531795857526L
-    val dateType: String = "shi"
-    //
-    //    if (args.length != 0) {
-    //
-    //      aus = args(0)
-    //      logic = args(1)
-    //      begDate = args(2)
-    //      endDate = args(3)
-    //      dateType = args(4)
-    //    }
+    implicit var aus: String = ""
 
-    val conf = new SparkConf().setMaster("local").setAppName("AnimateApplication")
+    implicit var logic: String = ""
+    implicit var begDate: Long = 0L
+    implicit var endDate: Long = 0L
+    implicit var dateType: String = ""
+    //
+    if (args.length != 0) {
+
+      taskId = args(0)
+    }
+    println(taskId);
+    val jr = new Jedis("192.168.100.26", 6379);
+    aus = jr.get(taskId + "=aus")
+    logic = jr.get(taskId + "=logic")
+    begDate = jr.get(taskId + "=begDate").toLong
+    endDate = jr.get(taskId + "=endDate").toLong
+    dateType = jr.get(taskId + "=dateType")
+
+    val conf = new SparkConf()
+//      .setMaster("local")
+      .setAppName("AnimateApplication")
+      .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      .registerKryoClasses(Array(classOf[Animate], classOf[UaList]))
+
     val sc = new SparkContext(conf)
     val sqlContext = new SQLContext(sc)
 
     val df = sqlContext.read.json("hdfs://192.168.100.26:8020/ES_Test_DATA/*.json")
-
 
     val filterFun = (row: Row) => {
 
@@ -146,14 +164,29 @@ object AnimateApplication {
 
     //    flag
     import sqlContext.implicits._
-    val animate = df.rdd.filter(filterFun).mapPartitions(mapTimeFun).toDS()
-    animate.groupBy("loginTime").count().show()
-    //    df.filter(filterFun).groupBy("area", "terminal", "subject").count().show()
-    //    df.filter(filterFun).groupBy("area", "terminal", "subject")
-    //      .count().repartition(1).rdd
-    //      .saveAsTextFile("hdfs://192.168.100.26:8020/ES_Test_DATA/" + (new util.Random).nextInt(5) + "")
 
+    val str = new StrAppend
+    sc.register(str)
 
+    val animate = df.coalesce(1).rdd.filter(filterFun)
+      .mapPartitions(mapTimeFun)
+      .map(an => (an.loginTime, 1))
+      .reduceByKey(_ + _).coalesce(1,true)
+      .foreachPartition((ite: Iterator[(String, Int)]) => {
+
+        while (ite.hasNext) {
+          val i = ite.next()
+
+          val tmp = i._1.concat("=").concat(i._2.toString).concat("|")
+          str.add(tmp)
+        }
+      })
+
+    val key = aus + "+" + logic + "+" + begDate + "+" + endDate + "+" + dateType
+    jr.set(key, str.value.toString())
+    jr.expire(key, 30 * 60)
+
+    sc.stop()
   }
 
 
