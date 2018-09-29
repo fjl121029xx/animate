@@ -3,15 +3,13 @@ package com.li.animate
 import java.text.SimpleDateFormat
 import java.util.Date
 
-
 import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.sql.{Dataset, Row, SQLContext}
+import org.apache.spark.sql.{Dataset, Row, SQLContext, SparkSession}
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 import org.json4s.jackson.Serialization
 
 import scala.util.control.Breaks._
-
 import redis.clients.jedis._
 
 case class UserAnimate(conditionKey: String,
@@ -42,7 +40,7 @@ object AnimateApplication {
 
   def main(args: Array[String]): Unit = {
 
-    implicit var taskId: String = ""
+    implicit var taskId: String = "796c586f-f074-421c-b1b8-adcba54fe552"
 
     implicit var aus: String = ""
 
@@ -64,15 +62,21 @@ object AnimateApplication {
     dateType = jr.get(taskId + "=dateType")
 
     val conf = new SparkConf()
-//      .setMaster("local")
+      .setMaster("local")
       .setAppName("AnimateApplication")
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      .set("spark.sql.files.maxPartitionBytes", "134217728")
       .registerKryoClasses(Array(classOf[Animate], classOf[UaList]))
 
     val sc = new SparkContext(conf)
-    val sqlContext = new SQLContext(sc)
 
-    val df = sqlContext.read.json("hdfs://192.168.100.26:8020/ES_Test_DATA/*.json")
+    val sqlSession = SparkSession
+      .builder()
+      .appName("AnimateApplication")
+      .config(conf)
+      .getOrCreate()
+
+    val df = sqlSession.read.json("hdfs://192.168.100.26:8020/MQ/active")
 
     val filterFun = (row: Row) => {
 
@@ -163,15 +167,14 @@ object AnimateApplication {
     }
 
     //    flag
-    import sqlContext.implicits._
 
     val str = new StrAppend
     sc.register(str)
 
-    val animate = df.coalesce(1).rdd.filter(filterFun)
+    val animate = df.repartition(1).rdd.filter(filterFun)
       .mapPartitions(mapTimeFun)
       .map(an => (an.loginTime, 1))
-      .reduceByKey(_ + _).coalesce(1,true)
+      .reduceByKey(_ + _).coalesce(1)
       .foreachPartition((ite: Iterator[(String, Int)]) => {
 
         while (ite.hasNext) {
